@@ -1,5 +1,9 @@
 package com.example.picturecalendar.ui.presentation.screens
 
+import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -41,9 +46,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -60,11 +68,22 @@ data class SimpleDate(
     val year: Int,
     val month: Int, // 1..12
     val day: Int
-)
+) {
+    companion object {
+        fun today(): SimpleDate {
+            val cal = Calendar.getInstance()
+            return SimpleDate(
+                year = cal.get(Calendar.YEAR),
+                month = cal.get(Calendar.MONTH) + 1,
+                day = cal.get(Calendar.DAY_OF_MONTH)
+            )
+        }
+    }
+}
 
 data class SimpleYearMonth(
     val year: Int,
-    val month: Int
+    val month: Int // 1..12
 ) {
     fun monthName(): String {
         val names = arrayOf(
@@ -94,6 +113,13 @@ data class SimpleYearMonth(
         val cal = GregorianCalendar(year, month - 1, 1)
         return cal.get(Calendar.DAY_OF_WEEK) - 1
     }
+
+    companion object {
+        fun now(): SimpleYearMonth {
+            val cal = Calendar.getInstance()
+            return SimpleYearMonth(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1)
+        }
+    }
 }
 
 /**
@@ -103,15 +129,30 @@ data class CalendarDay(
     val date: SimpleDate,
     val isCurrentMonth: Boolean,
     val isToday: Boolean = false,
-    val hasPhotoPlaceholder: Boolean = false
+    val photoBitmap: Bitmap? = null
 )
 
 @Composable
 fun CalendarScreen(
     modifier: Modifier = Modifier
 ) {
-    var currentYearMonth by remember { mutableStateOf(SimpleYearMonth(2023, 1)) }
-    var selectedDate by remember { mutableStateOf<SimpleDate?>(SimpleDate(2023, 1, 15)) }
+    val todayDate = remember { SimpleDate.today() }
+    var currentYearMonth by remember { mutableStateOf(SimpleYearMonth.now()) }
+    var selectedDate by remember { mutableStateOf<SimpleDate?>(todayDate) }
+
+    // Map storing captured photos per date
+    var dayPhotos by remember { mutableStateOf<Map<SimpleDate, Bitmap>>(emptyMap()) }
+    var photoTargetDate by remember { mutableStateOf<SimpleDate?>(null) }
+
+    // Camera launcher contract
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap: Bitmap? ->
+        if (bitmap != null) {
+            val target = photoTargetDate ?: SimpleDate.today()
+            dayPhotos = dayPhotos + (target to bitmap)
+        }
+    }
 
     val monthTitle = remember(currentYearMonth) {
         "${currentYearMonth.monthName()} ${currentYearMonth.year}"
@@ -135,36 +176,66 @@ fun CalendarScreen(
                 )
             },
             trailingBtn = {
-                Text(
-                    text = ">",
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .clickable { currentYearMonth = currentYearMonth.plusMonths(1) }
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AssistChip(
+                        onClick = {
+                            currentYearMonth = SimpleYearMonth.now()
+                            selectedDate = SimpleDate.today()
+                        },
+                        label = { Text("Today") },
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                    Text(
+                        text = ">",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable { currentYearMonth = currentYearMonth.plusMonths(1) }
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                }
             }
         )
 
         CalendarBody(
             yearMonth = currentYearMonth,
             selectedDate = selectedDate,
+            dayPhotos = dayPhotos,
             onDateSelected = { date -> selectedDate = date },
+            onAddPhotoClick = { date ->
+                photoTargetDate = date
+                cameraLauncher.launch(null)
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
         )
+
+        // Floating Action Button to capture photo for today's date
+        Button(
+            onClick = {
+                photoTargetDate = SimpleDate.today()
+                cameraLauncher.launch(null)
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text("📷 Capture Photo for Today")
+        }
     }
 }
 
 @Composable
 fun CalendarBody(
     modifier: Modifier = Modifier,
-    yearMonth: SimpleYearMonth = SimpleYearMonth(2023, 1),
+    yearMonth: SimpleYearMonth = SimpleYearMonth.now(),
     selectedDate: SimpleDate? = null,
-    onDateSelected: (SimpleDate) -> Unit = {}
+    dayPhotos: Map<SimpleDate, Bitmap> = emptyMap(),
+    onDateSelected: (SimpleDate) -> Unit = {},
+    onAddPhotoClick: (SimpleDate) -> Unit = {}
 ) {
-    val days = remember(yearMonth) { generateCalendarDays(yearMonth) }
+    val days = remember(yearMonth, dayPhotos) { generateCalendarDays(yearMonth, dayPhotos) }
     val daysOfWeek = remember {
         listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
     }
@@ -269,6 +340,9 @@ fun CalendarBody(
                                 if (day.isCurrentMonth) {
                                     onDateSelected(day.date)
                                 }
+                            },
+                            onAddPhotoClick = {
+                                onAddPhotoClick(day.date)
                             }
                         )
                     }
@@ -300,6 +374,7 @@ fun CalendarDayCell(
     day: CalendarDay,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onAddPhotoClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val backgroundColor = when {
@@ -323,12 +398,28 @@ fun CalendarDayCell(
         elevation = CardDefaults.cardElevation(defaultElevation = if (isSelected) 4.dp else 1.dp)
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(4.dp)
+            modifier = Modifier.fillMaxSize()
         ) {
+            // Display captured photo if present for this day
+            if (day.photoBitmap != null) {
+                Image(
+                    bitmap = day.photoBitmap.asImageBitmap(),
+                    contentDescription = "Photo for ${day.date.day}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // Scrim for readable day number over photo
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.2f))
+                )
+            }
+
+            // Day Number Badge
             Box(
                 modifier = Modifier
+                    .padding(4.dp)
                     .align(Alignment.TopStart)
                     .then(
                         if (day.isToday) {
@@ -346,63 +437,60 @@ fun CalendarDayCell(
                     style = MaterialTheme.typography.labelSmall,
                     fontSize = 11.sp,
                     fontWeight = if (day.isToday || isSelected) FontWeight.Bold else FontWeight.Normal,
-                    color = if (day.isToday) MaterialTheme.colorScheme.onPrimary else contentColor
+                    color = if (day.isToday || day.photoBitmap != null) Color.White else contentColor
                 )
             }
 
-            if (day.isCurrentMonth) {
+            // Photo Placeholder / Add Photo action button
+            if (day.isCurrentMonth && day.photoBitmap == null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(38.dp)
+                        .height(36.dp)
                         .align(Alignment.BottomCenter)
+                        .padding(horizontal = 3.dp, vertical = 3.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .background(
-                            if (day.hasPhotoPlaceholder) {
-                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
+                            if (day.isToday) {
+                                MaterialTheme.colorScheme.primaryContainer
                             } else {
-                                MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                                MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
                             }
                         )
                         .border(
                             width = 1.dp,
-                            color = if (day.hasPhotoPlaceholder) {
-                                MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)
+                            color = if (day.isToday) {
+                                MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                             },
                             shape = RoundedCornerShape(6.dp)
-                        ),
+                        )
+                        .clickable(onClick = onAddPhotoClick),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (day.hasPhotoPlaceholder) {
-                        // Visual placeholder representing a photo
-                        Text(
-                            text = "📷",
-                            fontSize = 14.sp
-                        )
-                    } else {
-                        // Placeholder for adding photo
-                        Text(
-                            text = "+",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
-                    }
+                    Text(
+                        text = if (day.isToday) "📷 Today" else "+",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontSize = if (day.isToday) 10.sp else 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (day.isToday) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        }
+                    )
                 }
             }
         }
     }
 }
 
-private fun generateCalendarDays(yearMonth: SimpleYearMonth): List<CalendarDay> {
-    val todayCal = Calendar.getInstance()
-    val today = SimpleDate(
-        year = todayCal.get(Calendar.YEAR),
-        month = todayCal.get(Calendar.MONTH) + 1,
-        day = todayCal.get(Calendar.DAY_OF_MONTH)
-    )
-
+private fun generateCalendarDays(
+    yearMonth: SimpleYearMonth,
+    dayPhotos: Map<SimpleDate, Bitmap>
+): List<CalendarDay> {
+    val today = SimpleDate.today()
     val daysInMonth = yearMonth.lengthOfMonth()
     val firstDayOffset = yearMonth.firstDayOfWeekOffset()
 
@@ -415,7 +503,8 @@ private fun generateCalendarDays(yearMonth: SimpleYearMonth): List<CalendarDay> 
         calendarDays.add(
             CalendarDay(
                 date = date,
-                isCurrentMonth = false
+                isCurrentMonth = false,
+                photoBitmap = dayPhotos[date]
             )
         )
     }
@@ -427,7 +516,7 @@ private fun generateCalendarDays(yearMonth: SimpleYearMonth): List<CalendarDay> 
                 date = date,
                 isCurrentMonth = true,
                 isToday = date == today,
-                hasPhotoPlaceholder = day % 3 == 0
+                photoBitmap = dayPhotos[date]
             )
         )
     }
@@ -439,7 +528,8 @@ private fun generateCalendarDays(yearMonth: SimpleYearMonth): List<CalendarDay> 
         calendarDays.add(
             CalendarDay(
                 date = date,
-                isCurrentMonth = false
+                isCurrentMonth = false,
+                photoBitmap = dayPhotos[date]
             )
         )
     }
@@ -461,7 +551,7 @@ fun CalendarBodyPreview() {
     PictureCalendarTheme {
         Surface {
             CalendarBody(
-                yearMonth = SimpleYearMonth(2023, 1)
+                yearMonth = SimpleYearMonth.now()
             )
         }
     }
