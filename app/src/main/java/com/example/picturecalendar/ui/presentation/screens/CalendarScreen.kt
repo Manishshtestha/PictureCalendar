@@ -11,31 +11,43 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -52,13 +64,19 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.picturecalendar.R
+import com.example.picturecalendar.data.DayPhotoData
+import com.example.picturecalendar.data.PhotoStorage
 import com.example.picturecalendar.ui.presentation.components.Header
 import com.example.picturecalendar.ui.theme.PictureCalendarTheme
 import java.util.Calendar
@@ -69,6 +87,15 @@ data class SimpleDate(
     val month: Int, // 1..12
     val day: Int
 ) {
+    fun formattedString(): String {
+        val monthNames = arrayOf(
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        )
+        val mName = monthNames[(month - 1).coerceIn(0, 11)]
+        return "$mName $day, $year"
+    }
+
     companion object {
         fun today(): SimpleDate {
             val cal = Calendar.getInstance()
@@ -108,10 +135,15 @@ data class SimpleYearMonth(
         return cal.getActualMaximum(Calendar.DAY_OF_MONTH)
     }
 
-    // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-    fun firstDayOfWeekOffset(): Int {
+    // Offset based on week starting day (0-indexed)
+    fun firstDayOfWeekOffset(startWeekOnMonday: Boolean): Int {
         val cal = GregorianCalendar(year, month - 1, 1)
-        return cal.get(Calendar.DAY_OF_WEEK) - 1
+        val dayOfWeek = cal.get(Calendar.DAY_OF_WEEK) // Sunday = 1, Monday = 2 ...
+        return if (startWeekOnMonday) {
+            (dayOfWeek + 5) % 7
+        } else {
+            dayOfWeek - 1
+        }
     }
 
     companion object {
@@ -129,28 +161,42 @@ data class CalendarDay(
     val date: SimpleDate,
     val isCurrentMonth: Boolean,
     val isToday: Boolean = false,
-    val photoBitmap: Bitmap? = null
+    val photoData: DayPhotoData? = null
 )
 
 @Composable
 fun CalendarScreen(
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val todayDate = remember { SimpleDate.today() }
+
     var currentYearMonth by remember { mutableStateOf(SimpleYearMonth.now()) }
     var selectedDate by remember { mutableStateOf<SimpleDate?>(todayDate) }
 
-    // Map storing captured photos per date
-    var dayPhotos by remember { mutableStateOf<Map<SimpleDate, Bitmap>>(emptyMap()) }
-    var photoTargetDate by remember { mutableStateOf<SimpleDate?>(null) }
+    // Week start setting: false = Sunday start, true = Monday start
+    var startWeekOnMonday by remember { mutableStateOf(false) }
 
-    // Camera launcher contract
+    // Persistent day photos
+    var dayPhotos by remember { mutableStateOf<Map<SimpleDate, DayPhotoData>>(emptyMap()) }
+
+    // Detail dialog state
+    var activeDetailPhotoDate by remember { mutableStateOf<SimpleDate?>(null) }
+
+    // Load persisted photos on start
+    LaunchedEffect(Unit) {
+        dayPhotos = PhotoStorage.loadAllPhotos(context)
+    }
+
+    // Camera launcher contract for capturing photos
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
     ) { bitmap: Bitmap? ->
         if (bitmap != null) {
-            val target = photoTargetDate ?: SimpleDate.today()
-            dayPhotos = dayPhotos + (target to bitmap)
+            // Only allow capture/retake for TODAY
+            val existingCaption = dayPhotos[todayDate]?.caption ?: ""
+            PhotoStorage.savePhoto(context, todayDate, bitmap, existingCaption)
+            dayPhotos = PhotoStorage.loadAllPhotos(context)
         }
     }
 
@@ -166,62 +212,142 @@ fun CalendarScreen(
             subtitle = monthTitle,
             icon = painterResource(R.drawable.outline_dashboard_24),
             leadingBtn = {
-                Text(
-                    text = "<",
-                    style = MaterialTheme.typography.titleLarge,
+                Box(
                     modifier = Modifier
+                        .size(44.dp)
                         .clip(CircleShape)
                         .clickable { currentYearMonth = currentYearMonth.minusMonths(1) }
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                )
+                        .semantics { contentDescription = "Previous Month" },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "◀",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             },
             trailingBtn = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    AssistChip(
-                        onClick = {
-                            currentYearMonth = SimpleYearMonth.now()
-                            selectedDate = SimpleDate.today()
-                        },
-                        label = { Text("Today") },
-                        modifier = Modifier.padding(end = 4.dp)
-                    )
-                    Text(
-                        text = ">",
-                        style = MaterialTheme.typography.titleLarge,
+                    Box(
                         modifier = Modifier
+                            .size(44.dp)
                             .clip(CircleShape)
                             .clickable { currentYearMonth = currentYearMonth.plusMonths(1) }
-                            .padding(horizontal = 12.dp, vertical = 4.dp)
-                    )
+                            .semantics { contentDescription = "Next Month" },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "▶",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
         )
 
+        // Sub-header controls (Today Jump & Week Start Setting)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AssistChip(
+                onClick = {
+                    currentYearMonth = SimpleYearMonth.now()
+                    selectedDate = SimpleDate.today()
+                },
+                label = { Text("Jump to Today") },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                )
+            )
+
+            FilterChip(
+                selected = startWeekOnMonday,
+                onClick = { startWeekOnMonday = !startWeekOnMonday },
+                label = {
+                    Text(if (startWeekOnMonday) "Week: Mon" else "Week: Sun")
+                }
+            )
+        }
+
+        // Main Calendar Grid
         CalendarBody(
             yearMonth = currentYearMonth,
             selectedDate = selectedDate,
+            startWeekOnMonday = startWeekOnMonday,
             dayPhotos = dayPhotos,
-            onDateSelected = { date -> selectedDate = date },
-            onAddPhotoClick = { date ->
-                photoTargetDate = date
+            onDateSelected = { date ->
+                selectedDate = date
+                if (dayPhotos.containsKey(date)) {
+                    activeDetailPhotoDate = date
+                }
+            },
+            onCaptureTodayClick = {
                 cameraLauncher.launch(null)
+            },
+            onSwipeNextMonth = {
+                currentYearMonth = currentYearMonth.plusMonths(1)
+            },
+            onSwipePreviousMonth = {
+                currentYearMonth = currentYearMonth.minusMonths(1)
             },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
         )
 
-        // Floating Action Button to capture photo for today's date
+        // Primary Action Button (Today Capture / Retake)
+        val todayHasPhoto = dayPhotos.containsKey(todayDate)
         Button(
             onClick = {
-                photoTargetDate = SimpleDate.today()
                 cameraLauncher.launch(null)
             },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
+                .height(48.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (todayHasPhoto) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+            )
         ) {
-            Text("📷 Capture Photo for Today")
+            Text(
+                text = if (todayHasPhoto) "📷 Retake Today's Photo" else "📷 Capture Today's Photo",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+
+    // Full-screen / Detail dialog for viewing, editing caption, sharing or deleting photo
+    activeDetailPhotoDate?.let { date ->
+        val photoData = dayPhotos[date]
+        if (photoData != null) {
+            PhotoDetailDialog(
+                photoData = photoData,
+                isToday = date == todayDate,
+                onDismiss = { activeDetailPhotoDate = null },
+                onSaveCaption = { newCaption ->
+                    PhotoStorage.saveCaption(context, date, newCaption)
+                    dayPhotos = PhotoStorage.loadAllPhotos(context)
+                },
+                onRetakePhoto = {
+                    activeDetailPhotoDate = null
+                    cameraLauncher.launch(null)
+                },
+                onDeletePhoto = {
+                    PhotoStorage.deletePhoto(context, date)
+                    dayPhotos = PhotoStorage.loadAllPhotos(context)
+                    activeDetailPhotoDate = null
+                },
+                onSharePhoto = {
+                    PhotoStorage.sharePhoto(context, date, photoData.caption)
+                }
+            )
         }
     }
 }
@@ -231,18 +357,31 @@ fun CalendarBody(
     modifier: Modifier = Modifier,
     yearMonth: SimpleYearMonth = SimpleYearMonth.now(),
     selectedDate: SimpleDate? = null,
-    dayPhotos: Map<SimpleDate, Bitmap> = emptyMap(),
+    startWeekOnMonday: Boolean = false,
+    dayPhotos: Map<SimpleDate, DayPhotoData> = emptyMap(),
     onDateSelected: (SimpleDate) -> Unit = {},
-    onAddPhotoClick: (SimpleDate) -> Unit = {}
+    onCaptureTodayClick: () -> Unit = {},
+    onSwipeNextMonth: () -> Unit = {},
+    onSwipePreviousMonth: () -> Unit = {}
 ) {
-    val days = remember(yearMonth, dayPhotos) { generateCalendarDays(yearMonth, dayPhotos) }
-    val daysOfWeek = remember {
-        listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+    val days = remember(yearMonth, dayPhotos, startWeekOnMonday) {
+        generateCalendarDays(yearMonth, dayPhotos, startWeekOnMonday)
+    }
+
+    val daysOfWeek = remember(startWeekOnMonday) {
+        if (startWeekOnMonday) {
+            listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        } else {
+            listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+        }
     }
 
     // Zoom and pan gestures state
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+
+    // Swipe horizontal drag detection for changing months when unzoomed
+    var totalDragX by remember { mutableFloatStateOf(0f) }
 
     Box(
         modifier = modifier.padding(horizontal = 8.dp)
@@ -267,7 +406,7 @@ fun CalendarBody(
                 }
             }
 
-            // Zoomable calendar grid area
+            // Zoomable and Swipeable calendar grid container
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -285,6 +424,24 @@ fun CalendarBody(
                                 }
                             }
                         )
+                    }
+                    .pointerInput(scale) {
+                        if (scale == 1f) {
+                            detectHorizontalDragGestures(
+                                onDragStart = { totalDragX = 0f },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    totalDragX += dragAmount
+                                },
+                                onDragEnd = {
+                                    if (totalDragX < -120f) {
+                                        onSwipeNextMonth()
+                                    } else if (totalDragX > 120f) {
+                                        onSwipePreviousMonth()
+                                    }
+                                }
+                            )
+                        }
                     }
                     .pointerInput(Unit) {
                         awaitEachGesture {
@@ -341,9 +498,7 @@ fun CalendarBody(
                                     onDateSelected(day.date)
                                 }
                             },
-                            onAddPhotoClick = {
-                                onAddPhotoClick(day.date)
-                            }
+                            onCaptureTodayClick = onCaptureTodayClick
                         )
                     }
                 }
@@ -374,7 +529,7 @@ fun CalendarDayCell(
     day: CalendarDay,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onAddPhotoClick: () -> Unit,
+    onCaptureTodayClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val backgroundColor = when {
@@ -389,30 +544,37 @@ fun CalendarDayCell(
         else -> MaterialTheme.colorScheme.onSurface
     }
 
+    val dateDescription = remember(day) {
+        val hasPhoto = if (day.photoData != null) ", has photo" else ""
+        val todayStr = if (day.isToday) ", Today" else ""
+        "${day.date.formattedString()}$todayStr$hasPhoto"
+    }
+
     Card(
         modifier = modifier
             .aspectRatio(0.85f)
             .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = day.isCurrentMonth, onClick = onClick),
+            .clickable(enabled = day.isCurrentMonth, onClick = onClick)
+            .semantics { contentDescription = dateDescription },
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
         elevation = CardDefaults.cardElevation(defaultElevation = if (isSelected) 4.dp else 1.dp)
     ) {
         Box(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Display captured photo if present for this day
-            if (day.photoBitmap != null) {
+            // Display photo if present for this day
+            if (day.photoData != null) {
                 Image(
-                    bitmap = day.photoBitmap.asImageBitmap(),
+                    bitmap = day.photoData.bitmap.asImageBitmap(),
                     contentDescription = "Photo for ${day.date.day}",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
-                // Scrim for readable day number over photo
+                // Dark scrim for day number contrast
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.2f))
+                        .background(Color.Black.copy(alpha = 0.25f))
                 )
             }
 
@@ -437,48 +599,50 @@ fun CalendarDayCell(
                     style = MaterialTheme.typography.labelSmall,
                     fontSize = 11.sp,
                     fontWeight = if (day.isToday || isSelected) FontWeight.Bold else FontWeight.Normal,
-                    color = if (day.isToday || day.photoBitmap != null) Color.White else contentColor
+                    color = if (day.isToday || day.photoData != null) Color.White else contentColor
                 )
             }
 
-            // Photo Placeholder / Add Photo action button
-            if (day.isCurrentMonth && day.photoBitmap == null) {
+            // Caption Indicator Badge if present
+            if (day.photoData?.caption?.isNotBlank() == true) {
+                Box(
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .align(Alignment.TopEnd)
+                        .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "📝",
+                        fontSize = 10.sp
+                    )
+                }
+            }
+
+            // Capture button ONLY for Today (when no photo exists yet)
+            if (day.isCurrentMonth && day.isToday && day.photoData == null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(36.dp)
+                        .height(34.dp)
                         .align(Alignment.BottomCenter)
                         .padding(horizontal = 3.dp, vertical = 3.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            if (day.isToday) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
-                            }
-                        )
+                        .background(MaterialTheme.colorScheme.primaryContainer)
                         .border(
                             width = 1.dp,
-                            color = if (day.isToday) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                            },
+                            color = MaterialTheme.colorScheme.primary,
                             shape = RoundedCornerShape(6.dp)
                         )
-                        .clickable(onClick = onAddPhotoClick),
+                        .clickable(onClick = onCaptureTodayClick),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (day.isToday) "📷 Today" else "+",
+                        text = "📷 Today",
                         style = MaterialTheme.typography.labelMedium,
-                        fontSize = if (day.isToday) 10.sp else 13.sp,
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (day.isToday) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        }
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
             }
@@ -486,13 +650,164 @@ fun CalendarDayCell(
     }
 }
 
+/**
+ * Full screen / Detail Dialog for viewing photo, editing caption, sharing, retaking, or deleting.
+ */
+@Composable
+fun PhotoDetailDialog(
+    photoData: DayPhotoData,
+    isToday: Boolean,
+    onDismiss: () -> Unit,
+    onSaveCaption: (String) -> Unit,
+    onRetakePhoto: () -> Unit,
+    onDeletePhoto: () -> Unit,
+    onSharePhoto: () -> Unit
+) {
+    var captionText by remember { mutableStateOf(photoData.caption) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Header (Date & Close)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = photoData.date.formattedString(),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Full Photo View
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                ) {
+                    Image(
+                        bitmap = photoData.bitmap.asImageBitmap(),
+                        contentDescription = "Full photo for ${photoData.date.formattedString()}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Caption Input
+                OutlinedTextField(
+                    value = captionText,
+                    onValueChange = { captionText = it },
+                    label = { Text("Photo Caption (Optional)") },
+                    placeholder = { Text("What made this day special?") },
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 3
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Save Caption Button
+                if (captionText != photoData.caption) {
+                    Button(
+                        onClick = { onSaveCaption(captionText) },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Save Caption")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Actions Row (Share, Retake, Delete)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onSharePhoto,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("📤 Share Memory")
+                        }
+
+                        if (isToday) {
+                            Button(
+                                onClick = onRetakePhoto,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("📷 Retake")
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { showDeleteConfirm = true },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("🗑 Delete Photo")
+                    }
+                }
+            }
+        }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete Photo?") },
+            text = { Text("Are you sure you want to delete this memory? This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = onDeletePhoto) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
 private fun generateCalendarDays(
     yearMonth: SimpleYearMonth,
-    dayPhotos: Map<SimpleDate, Bitmap>
+    dayPhotos: Map<SimpleDate, DayPhotoData>,
+    startWeekOnMonday: Boolean
 ): List<CalendarDay> {
     val today = SimpleDate.today()
     val daysInMonth = yearMonth.lengthOfMonth()
-    val firstDayOffset = yearMonth.firstDayOfWeekOffset()
+    val firstDayOffset = yearMonth.firstDayOfWeekOffset(startWeekOnMonday)
 
     val calendarDays = mutableListOf<CalendarDay>()
 
@@ -504,7 +819,7 @@ private fun generateCalendarDays(
             CalendarDay(
                 date = date,
                 isCurrentMonth = false,
-                photoBitmap = dayPhotos[date]
+                photoData = dayPhotos[date]
             )
         )
     }
@@ -516,7 +831,7 @@ private fun generateCalendarDays(
                 date = date,
                 isCurrentMonth = true,
                 isToday = date == today,
-                photoBitmap = dayPhotos[date]
+                photoData = dayPhotos[date]
             )
         )
     }
@@ -529,7 +844,7 @@ private fun generateCalendarDays(
             CalendarDay(
                 date = date,
                 isCurrentMonth = false,
-                photoBitmap = dayPhotos[date]
+                photoData = dayPhotos[date]
             )
         )
     }
